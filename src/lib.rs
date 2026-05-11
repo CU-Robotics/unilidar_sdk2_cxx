@@ -8,14 +8,26 @@ use thiserror::Error;
 mod ffi {
 
     #[derive(Debug, Clone, Copy)]
+    /// Data recieved from the IMU.
+    ///
+    /// `angular_velocity` and `linear_acceleration` are probably [x, y, z].
+    ///
+    /// `quaternion` might be [w, x, y, z]. Don't know for sure. Could also be [x, y, z, w]
     struct ImuData {
         pub info: DataInfo,
-        pub quaternion: [f32; 4], // Maybe it's [w, x, y, z]. Don't know for sure. Could also be [x, y, z, w]
+        pub quaternion: [f32; 4],
         pub angular_velocity: [f32; 3],
         pub linear_acceleration: [f32; 3],
     }
 
     #[derive(Debug, Clone, Copy)]
+    /// Generic packet information attached to `ImuData` and some other (not yet translated) structs.
+    ///
+    /// `seq` is the number of the packet, probably increasing with each one sent.
+    ///
+    /// `payload_size` is probably the size of the full packet in bytes.
+    ///
+    /// `stamp` is the time of the message.
     struct DataInfo {
         pub seq: u32,
         pub payload_size: u32,
