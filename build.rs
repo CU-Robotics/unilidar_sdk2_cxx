@@ -7,8 +7,10 @@ fn main() {
         .flag("-std=c++17")
         .compile("cxxbridge-demo");
 
+    let base_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap();
-    let lib_dir = PathBuf::from("unitree_lidar_sdk/lib").join(&arch);
+    let lib_dir = base_dir.join("unitree_lidar_sdk/lib").join(&arch);
+
     println!("cargo:rustc-link-search=native={}", lib_dir.display());
     println!("cargo:rustc-link-lib=static=unilidar_sdk2");
 
