@@ -74,11 +74,24 @@ mod ffi {
             range_min: f32,
             range_max: f32,
         ) -> i32;
+        fn initializeUDP(
+            self: Pin<&mut LidarWrapper>,
+            lidar_port: u16,
+            lidar_ip: String,
+            local_port: u16,
+            local_ip: String,
+            cloud_scan_num: u16,
+            use_system_timestamp: bool,
+            range_min: f32,
+            range_max: f32,
+        ) -> i32;
         fn closeSerial(self: Pin<&mut LidarWrapper>) -> bool;
+        fn closeUDP(self: Pin<&mut LidarWrapper>) -> bool;
         fn runParse(self: Pin<&mut LidarWrapper>) -> i32;
         fn resetLidar(self: Pin<&mut LidarWrapper>);
         fn startLidarRotation(self: Pin<&mut LidarWrapper>);
         fn stopLidarRotation(self: Pin<&mut LidarWrapper>);
+        fn setLidarWorkMode(self: Pin<&mut LidarWrapper>, mode: u32);
         fn getPointCloud(self: Pin<&mut LidarWrapper>, rustPointCloud: &mut PointCloud);
         fn getImuData(self: Pin<&mut LidarWrapper>, rustImuData: &mut ImuData);
     }
@@ -153,6 +166,28 @@ impl UnilidarL2 {
         self.lidar_wrapper.pin_mut().closeSerial()
     }
 
+    /// Initialize a UDP/Ethernet connection to a Unitree L2 lidar.
+    pub fn initialize_udp(&mut self, config: UdpConfig) -> Result<(), UdpInitializationError> {
+        match self.lidar_wrapper.pin_mut().initializeUDP(
+            config.lidar_port,
+            config.lidar_ip,
+            config.local_port,
+            config.local_ip,
+            config.cloud_scan_num,
+            config.use_system_timestamp,
+            config.range_min,
+            config.range_max,
+        ) {
+            0 => Ok(()),
+            -1 => Err(UdpInitializationError),
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn close_udp(&mut self) -> bool {
+        self.lidar_wrapper.pin_mut().closeUDP()
+    }
+
     /// Gets the next packet sent by the lidar and parses it.
     /// The return value is the type of packet received.
     pub fn run_parse(&mut self) -> LidarPacket {
@@ -205,6 +240,13 @@ impl UnilidarL2 {
         self.lidar_wrapper.pin_mut().stopLidarRotation();
     }
 
+    /// Set the lidar work mode. Mode `8` is required after `initialize_serial` for the lidar to
+    /// actually emit point/IMU packets over the serial link — without it the connection opens but
+    /// stays silent. Other modes exist but are not documented in the SDK.
+    pub fn set_lidar_work_mode(&mut self, mode: u32) {
+        self.lidar_wrapper.pin_mut().setLidarWorkMode(mode);
+    }
+
     /// Gets the latest parsed point cloud.
     // From a performance standpoint it could be faster to get the PointData2D, copy it to rust, and then parse it
     // from inside rust. Unsure, will have to test.
@@ -243,6 +285,10 @@ impl UnilidarL2 {
 /// Probably either 1. The specified port wasn't found. 2. No lidar at the specified port.
 pub struct SerialInitializationError;
 
+#[derive(Error, Debug)]
+#[error("udp initialization err")]
+pub struct UdpInitializationError;
+
 impl Default for UnilidarL2 {
     fn default() -> Self {
         Self::new()
@@ -279,5 +325,35 @@ impl SerialConfig {
     pub fn port(mut self, port: impl Into<String>) -> Self {
         self.port = port.into();
         self
+    }
+}
+
+/// Configuration for a lidar using a UDP/Ethernet connection. Passed to `UnilidarL2::initialize_udp`.
+#[derive(Debug)]
+pub struct UdpConfig {
+    pub lidar_port: u16,
+    pub lidar_ip: String,
+    pub local_port: u16,
+    pub local_ip: String,
+    pub cloud_scan_num: u16,
+    pub use_system_timestamp: bool,
+    pub range_min: f32,
+    pub range_max: f32,
+}
+
+impl Default for UdpConfig {
+    /// Factory defaults from the L2 user manual: lidar at 192.168.1.62, host at 192.168.1.2,
+    /// ports 6101 (lidar tx) and 6201 (host rx).
+    fn default() -> Self {
+        Self {
+            lidar_port: 6101,
+            lidar_ip: String::from("192.168.1.62"),
+            local_port: 6201,
+            local_ip: String::from("192.168.1.2"),
+            cloud_scan_num: 18,
+            use_system_timestamp: true,
+            range_min: 0.0,
+            range_max: 100.0,
+        }
     }
 }
