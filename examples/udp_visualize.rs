@@ -1,6 +1,5 @@
-use std::time::{Duration, Instant};
-
 use rerun::{Points3D, RecordingStreamBuilder};
+use std::time::{Duration, Instant};
 use unilidar_sdk2_cxx::{LidarPacket, UdpConfig, UnilidarL2};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -8,13 +7,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("rerun stream spawned");
 
     let mut lidar = UnilidarL2::new();
-    lidar.initialize_udp(UdpConfig::default())?;
+    let cfg = UdpConfig {
+        ..UdpConfig::default()
+    };
+    lidar.initialize_udp(cfg)?;
 
     lidar.stop_lidar_rotation();
     std::thread::sleep(Duration::from_secs(3));
     lidar.start_lidar_rotation();
     std::thread::sleep(Duration::from_secs(3));
+
     println!("entering parse loop");
+
+    const TRAIL_LEN: usize = 100;
+    let mut slot: usize = 0;
 
     let mut clouds_total = 0u64;
     let mut clouds_logged = 0u64;
@@ -25,6 +31,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             LidarPacket::PointData => {
                 let cloud = lidar.get_point_cloud();
                 clouds_total += 1;
+
                 if !cloud.points.is_empty() {
                     let positions: Vec<[f32; 3]> =
                         cloud.points.iter().map(|p| [p.x, p.y, p.z]).collect();
@@ -32,15 +39,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                         .points
                         .iter()
                         .map(|p| {
-                            let g = (p.intensity.clamp(0.0, 255.0)) as u8;
+                            let g = p.intensity.clamp(0.0, 255.0) as u8;
                             [g, g, g]
                         })
                         .collect();
 
                     rec.log(
-                        "lidar/points",
+                        format!("lidar/points/{slot}"),
                         &Points3D::new(positions).with_colors(colors),
                     )?;
+
+                    slot = (slot + 1) % TRAIL_LEN;
                     clouds_logged += 1;
                 }
 
