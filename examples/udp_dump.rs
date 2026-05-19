@@ -8,21 +8,19 @@ fn main() {
         .initialize_udp(UdpConfig::default())
         .expect("failed to open UDP socket — check the lidar is on 192.168.1.62 and your iface has 192.168.1.2");
 
+    println!("stopping lidar rotation");
+    lidar.stop_lidar_rotation();
+    std::thread::sleep(Duration::from_secs(3));
+
     println!("starting lidar rotation");
     lidar.start_lidar_rotation();
-    std::thread::sleep(Duration::from_secs(1));
-
-    println!("setting work mode to 0");
-    lidar.set_lidar_work_mode(0);
-    std::thread::sleep(Duration::from_secs(1));
-
-    println!("resetting lidar");
-    lidar.reset_lidar();
-    std::thread::sleep(Duration::from_secs(2));
+    std::thread::sleep(Duration::from_secs(3));
 
     let mut clouds = 0u64;
     let mut imus = 0u64;
     let mut last_report = Instant::now();
+
+    println!("starting loop");
 
     loop {
         match lidar.run_parse() {
