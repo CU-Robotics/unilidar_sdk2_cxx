@@ -26,8 +26,7 @@ fn main() {
 
     loop {
         match lidar.run_parse() {
-            LidarPacket::PointData2D => {
-                println!("point data 2d");
+            LidarPacket::PointData => {
                 let cloud = lidar.get_point_cloud();
                 clouds += 1;
                 if last_report.elapsed() >= Duration::from_secs(1) {
@@ -47,17 +46,18 @@ fn main() {
                 }
             }
             LidarPacket::ImuData => {
-                println!("imu data");
-                let imu_data = lidar.get_imu_data();
-                println!("{:?}", imu_data);
+                let _ = lidar.get_imu_data();
                 imus += 1;
+                if last_report.elapsed() >= Duration::from_secs(1) {
+                    println!("heartbeat: clouds={clouds} imus={imus}");
+                    last_report = Instant::now();
+                }
             }
             LidarPacket::NoPacket => {
-                println!("no packet");
                 std::thread::sleep(Duration::from_micros(100));
             }
-            _ => {
-                println!("null");
+            other => {
+                println!("other packet: {other:?}");
             }
         }
     }

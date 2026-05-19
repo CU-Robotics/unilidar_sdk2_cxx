@@ -106,9 +106,11 @@ pub enum LidarPacket {
     UserCmd,
     /// Sent by the lidar when it receives a command from the user.
     AckData,
-    /// PointData seems to represent receiving 1/6th of the full lidar scan.
+    /// A 3D point-cloud packet (LIDAR_POINT_DATA_PACKET_TYPE = 102). Call `get_point_cloud` to
+    /// read it. This is the packet type emitted in the L2's default 3D work mode.
     PointData,
-    /// PointData2D seems to represent receiving a full lidar scan. Probably sent once after every six PointData's? Unsure, will need to test.
+    /// A 2D point-cloud packet (LIDAR_2D_POINT_DATA_PACKET_TYPE = 103). Only emitted when the
+    /// lidar is in 2D mode.
     PointData2D,
     /// Received data from the IMU. This bindings library currently does not have bindings for getting this.
     ImuData,
