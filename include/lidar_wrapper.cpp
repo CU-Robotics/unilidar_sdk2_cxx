@@ -18,8 +18,34 @@ int LidarWrapper::initializeSerial(
     return this->lidarReader->initializeSerial(std::string(port), baudrate, cloud_scan_num, use_system_timestamp, range_min, range_max);
 };
 
+int LidarWrapper::initializeUDP(
+    uint16_t lidar_port,
+    rust::string lidar_ip,
+    uint16_t local_port,
+    rust::string local_ip,
+    uint16_t cloud_scan_num,
+    bool use_system_timestamp,
+    float range_min,
+    float range_max
+) {
+    return this->lidarReader->initializeUDP(
+        lidar_port,
+        std::string(lidar_ip),
+        local_port,
+        std::string(local_ip),
+        cloud_scan_num,
+        use_system_timestamp,
+        range_min,
+        range_max
+    );
+}
+
 bool LidarWrapper::closeSerial() {
     return this->lidarReader->closeSerial();
+}
+
+bool LidarWrapper::closeUDP() {
+    return this->lidarReader->closeUDP();
 }
 
 int LidarWrapper::runParse() {
@@ -36,6 +62,10 @@ void LidarWrapper::startLidarRotation() {
 
 void LidarWrapper::stopLidarRotation() {
     this->lidarReader->stopLidarRotation();
+}
+
+void LidarWrapper::setLidarWorkMode(uint32_t mode) {
+    this->lidarReader->setLidarWorkMode(mode);
 }
 
 void LidarWrapper::getPointCloud(PointCloud& rustPointCloud) {
@@ -79,5 +109,4 @@ void LidarWrapper::getImuData(ImuData& rustImuData) {
      rustImuData.linear_acceleration[0] = this->imuData.linear_acceleration[0];
      rustImuData.linear_acceleration[1] = this->imuData.linear_acceleration[1];
      rustImuData.linear_acceleration[2] = this->imuData.linear_acceleration[2];
-     rustImuData.linear_acceleration[3] = this->imuData.linear_acceleration[3];
 }
