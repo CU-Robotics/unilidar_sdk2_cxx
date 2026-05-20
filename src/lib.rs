@@ -157,6 +157,7 @@ pub struct UnilidarL2 {
     direct_serial: Option<SerialPointCloudReader>,
     direct_serial_config: Option<SerialConfig>,
     direct_serial_cloud: Option<PointCloud>,
+    direct_serial_imu: Option<ImuData>,
 }
 
 impl UnilidarL2 {
@@ -166,6 +167,7 @@ impl UnilidarL2 {
             direct_serial: None,
             direct_serial_config: None,
             direct_serial_cloud: None,
+            direct_serial_imu: None,
         }
     }
 
@@ -209,6 +211,7 @@ impl UnilidarL2 {
         self.direct_serial = Some(SerialPointCloudReader::open(config.clone())?);
         self.direct_serial_config = Some(config);
         self.direct_serial_cloud = None;
+        self.direct_serial_imu = None;
         Ok(())
     }
 
@@ -218,6 +221,7 @@ impl UnilidarL2 {
         self.direct_serial = None;
         self.direct_serial_config = None;
         self.direct_serial_cloud = None;
+        self.direct_serial_imu = None;
         self.lidar_wrapper.pin_mut().closeSerial()
     }
 
@@ -274,6 +278,7 @@ impl UnilidarL2 {
             return match reader.read_next() {
                 Ok(read) => {
                     self.direct_serial_cloud = read.point_cloud;
+                    self.direct_serial_imu = read.imu_data;
                     read.packet
                         .map(LidarPacket::from)
                         .unwrap_or(LidarPacket::NoPacket)
@@ -398,6 +403,24 @@ impl UnilidarL2 {
     }
 
     pub fn get_imu_data(&mut self) -> ImuData {
+        self.try_get_imu_data().unwrap_or(ImuData {
+            info: DataInfo {
+                seq: 0,
+                payload_size: 0,
+                stamp: ffi::TimeStamp { sec: 0, nsec: 0 },
+            },
+            quaternion: [0.0; 4],
+            angular_velocity: [0.0; 3],
+            linear_acceleration: [0.0; 3],
+        })
+    }
+
+    /// Gets the latest parsed IMU sample if one is available.
+    pub fn try_get_imu_data(&mut self) -> Option<ImuData> {
+        if self.direct_serial.is_some() {
+            return self.direct_serial_imu.take();
+        }
+
         let mut imu_data = ImuData {
             info: DataInfo {
                 seq: 0,
@@ -409,7 +432,7 @@ impl UnilidarL2 {
             linear_acceleration: [0.0; 3],
         };
         self.lidar_wrapper.pin_mut().getImuData(&mut imu_data);
-        imu_data
+        Some(imu_data)
     }
 }
 
