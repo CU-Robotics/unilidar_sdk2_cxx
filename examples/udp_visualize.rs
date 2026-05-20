@@ -1,7 +1,7 @@
 use rerun::{Points3D, RecordingStreamBuilder};
 use std::env;
 use std::time::{Duration, Instant};
-use unilidar_sdk2_cxx::{LidarPacket, UdpConfig, UnilidarL2};
+use unilidar_sdk2_cxx::{LidarPacket, LidarPacketCounts, UdpConfig, UnilidarL2};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let no_rerun = env::args().any(|arg| arg == "--no-rerun");
@@ -19,22 +19,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         cloud_scan_num: 18,
         ..UdpConfig::default()
     };
-    lidar.initialize_udp(cfg)?;
-
-    lidar.start_lidar_rotation();
-    std::thread::sleep(Duration::from_secs(1));
-
-    println!("setting work mode to 0 (udp)");
-    lidar.set_lidar_work_mode(0);
-    std::thread::sleep(Duration::from_secs(1));
-
-    println!("resetting lidar");
-    lidar.reset_lidar();
-    std::thread::sleep(Duration::from_secs(2));
-
-    println!("starting lidar rotation after reset");
-    lidar.start_lidar_rotation();
-    std::thread::sleep(Duration::from_secs(3));
+    lidar.initialize_udp_streaming(cfg)?;
 
     println!("entering parse loop");
 
@@ -43,24 +28,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mut clouds_total = 0u64;
     let mut clouds_logged = 0u64;
-    let mut point_packets = 0u64;
-    let mut point_2d_packets = 0u64;
-    let mut imu_packets = 0u64;
-    let mut ack_packets = 0u64;
-    let mut param_packets = 0u64;
-    let mut other_packets = 0u64;
-    let mut no_packets = 0u64;
+    let mut counts = LidarPacketCounts::default();
     let mut last_report = Instant::now();
 
     loop {
-        match lidar.run_parse() {
-            packet @ (LidarPacket::PointData | LidarPacket::PointData2D) => {
-                match packet {
-                    LidarPacket::PointData => point_packets += 1,
-                    LidarPacket::PointData2D => point_2d_packets += 1,
-                    _ => unreachable!(),
-                }
+        let packet = lidar.run_parse();
+        counts.record(&packet);
 
+        match packet {
+            LidarPacket::PointData | LidarPacket::PointData2D => {
                 if let Some(cloud) = lidar.try_get_point_cloud() {
                     clouds_total += 1;
 
@@ -100,30 +76,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             LidarPacket::NoPacket => {
-                no_packets += 1;
                 std::thread::sleep(Duration::from_micros(100));
             }
-            LidarPacket::ImuData => {
-                imu_packets += 1;
-            }
-            LidarPacket::AckData => {
-                ack_packets += 1;
-            }
-            LidarPacket::ParamData => {
-                param_packets += 1;
-            }
+            LidarPacket::ImuData | LidarPacket::AckData | LidarPacket::ParamData => {}
             other => {
-                other_packets += 1;
-                if other_packets <= 10 {
+                if counts.other_packets <= 10 {
                     println!("{:?}", other);
                 }
             }
         }
 
         if last_report.elapsed() >= Duration::from_secs(1) {
-            println!(
-                "point_packets={point_packets} point_2d_packets={point_2d_packets} imu_packets={imu_packets} ack_packets={ack_packets} param_packets={param_packets} other_packets={other_packets} no_packets={no_packets} clouds_total={clouds_total} clouds_logged={clouds_logged}"
-            );
+            println!("{counts} clouds_total={clouds_total} clouds_logged={clouds_logged}");
             last_report = Instant::now();
         }
     }

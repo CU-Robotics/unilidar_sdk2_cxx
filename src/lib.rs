@@ -2,11 +2,15 @@ pub use crate::ffi::{DataInfo, ImuData, Point, PointCloud};
 
 use crate::ffi::LidarWrapper;
 use cxx::UniquePtr;
+use std::env;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::net::Ipv4Addr;
+use std::num::ParseIntError;
+use std::path::Path;
 use std::process::Command;
 use std::str::FromStr;
+use std::time::Duration;
 use thiserror::Error;
 
 const FRAME_HEADER: [u8; 4] = [0x55, 0xaa, 0x05, 0x0a];
@@ -15,6 +19,8 @@ const LIDAR_2D_POINT_DATA_PACKET_TYPE: u32 = 103;
 const LIDAR_IP_ADDRESS_CONFIG_PACKET_TYPE: u32 = 108;
 const LIDAR_WORK_MODE_COMMAND_PACKET_TYPE: u32 = 2002;
 const MAX_FRAME_SIZE: usize = 6_000;
+const DEFAULT_SERIAL_PORT: &str = "/dev/ttyACM0";
+const LIDAR_SERIAL_BY_ID: &str = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A2A026768-if00";
 
 #[cxx::bridge]
 mod ffi {
@@ -198,6 +204,30 @@ impl UnilidarL2 {
         }
     }
 
+    /// Initialize UDP mode and perform the startup sequence needed for point-cloud packets.
+    ///
+    /// Unitree's UDP example starts rotation, sets work mode `0`, resets the lidar, then starts
+    /// rotation again. Skipping the final start can leave IMU packets flowing without point data.
+    pub fn initialize_udp_streaming(
+        &mut self,
+        config: UdpConfig,
+    ) -> Result<(), UdpInitializationError> {
+        self.initialize_udp(config)?;
+        self.start_lidar_rotation();
+        std::thread::sleep(Duration::from_secs(1));
+
+        self.set_lidar_work_mode(UDP_WORK_MODE);
+        std::thread::sleep(Duration::from_secs(1));
+
+        self.reset_lidar();
+        std::thread::sleep(Duration::from_secs(2));
+
+        self.start_lidar_rotation();
+        std::thread::sleep(Duration::from_secs(3));
+
+        Ok(())
+    }
+
     pub fn close_udp(&mut self) -> bool {
         self.lidar_wrapper.pin_mut().closeUDP()
     }
@@ -304,6 +334,49 @@ impl UnilidarL2 {
     }
 }
 
+const UDP_WORK_MODE: u32 = 0;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LidarPacketCounts {
+    pub point_packets: u64,
+    pub point_2d_packets: u64,
+    pub imu_packets: u64,
+    pub ack_packets: u64,
+    pub param_packets: u64,
+    pub no_packets: u64,
+    pub other_packets: u64,
+}
+
+impl LidarPacketCounts {
+    pub fn record(&mut self, packet: &LidarPacket) {
+        match packet {
+            LidarPacket::PointData => self.point_packets += 1,
+            LidarPacket::PointData2D => self.point_2d_packets += 1,
+            LidarPacket::ImuData => self.imu_packets += 1,
+            LidarPacket::AckData => self.ack_packets += 1,
+            LidarPacket::ParamData => self.param_packets += 1,
+            LidarPacket::NoPacket => self.no_packets += 1,
+            _ => self.other_packets += 1,
+        }
+    }
+}
+
+impl std::fmt::Display for LidarPacketCounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "point_packets={} point_2d_packets={} imu_packets={} ack_packets={} param_packets={} other_packets={} no_packets={}",
+            self.point_packets,
+            self.point_2d_packets,
+            self.imu_packets,
+            self.ack_packets,
+            self.param_packets,
+            self.other_packets,
+            self.no_packets
+        )
+    }
+}
+
 #[derive(Error, Debug)]
 #[error("initialziation err")]
 /// Some sort of serial initialization error. Unfortunately the C++ SDK does not expose more than
@@ -335,6 +408,11 @@ pub enum DirectSerialError {
     Write {
         port: String,
         source: std::io::Error,
+    },
+    #[error("invalid serial baudrate {baudrate:?}: {source}")]
+    InvalidBaudrate {
+        baudrate: String,
+        source: ParseIntError,
     },
     #[error("invalid IPv4 address {address:?}")]
     InvalidIpv4 { address: String },
@@ -377,6 +455,17 @@ impl Default for SerialConfig {
 }
 
 impl SerialConfig {
+    pub fn from_env_args() -> Result<Self, DirectSerialError> {
+        let args: Vec<String> = env::args().collect();
+        Self::from_args(&args)
+    }
+
+    pub fn from_args(args: &[String]) -> Result<Self, DirectSerialError> {
+        Ok(Self::default()
+            .port(serial_port(args))
+            .baudrate(serial_baudrate(args)?))
+    }
+
     pub fn port(mut self, port: impl Into<String>) -> Self {
         self.port = port.into();
         self
@@ -386,6 +475,38 @@ impl SerialConfig {
         self.baudrate = baudrate;
         self
     }
+}
+
+fn serial_port(args: &[String]) -> String {
+    if let Some(port) = arg_value(args, "--port") {
+        return port;
+    }
+
+    if let Ok(port) = env::var("UNILIDAR_SERIAL_PORT") {
+        return port;
+    }
+
+    if Path::new(LIDAR_SERIAL_BY_ID).exists() {
+        return LIDAR_SERIAL_BY_ID.to_owned();
+    }
+
+    DEFAULT_SERIAL_PORT.to_owned()
+}
+
+fn serial_baudrate(args: &[String]) -> Result<u32, DirectSerialError> {
+    let baudrate = arg_value(args, "--baud")
+        .or_else(|| env::var("UNILIDAR_SERIAL_BAUD").ok())
+        .unwrap_or_else(|| SerialConfig::default().baudrate.to_string());
+
+    baudrate
+        .parse()
+        .map_err(|source| DirectSerialError::InvalidBaudrate { baudrate, source })
+}
+
+fn arg_value(args: &[String], name: &str) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1].clone())
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -400,6 +521,37 @@ pub struct DirectSerialRead {
     pub bytes_read: usize,
     pub packet: Option<DirectSerialPacket>,
     pub point_cloud: Option<PointCloud>,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct DirectSerialPacketCounts {
+    pub bytes_read: u64,
+    pub point_packets: u64,
+    pub point_2d_packets: u64,
+    pub other_packets: u64,
+}
+
+impl DirectSerialPacketCounts {
+    pub fn record(&mut self, read: &DirectSerialRead) {
+        self.bytes_read += read.bytes_read as u64;
+
+        match read.packet {
+            Some(DirectSerialPacket::PointData) => self.point_packets += 1,
+            Some(DirectSerialPacket::PointData2D) => self.point_2d_packets += 1,
+            Some(DirectSerialPacket::Other(_)) => self.other_packets += 1,
+            None => {}
+        }
+    }
+}
+
+impl std::fmt::Display for DirectSerialPacketCounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "bytes_read={} point_packets={} point_2d_packets={} other_packets={}",
+            self.bytes_read, self.point_packets, self.point_2d_packets, self.other_packets
+        )
+    }
 }
 
 /// Direct serial point-cloud reader for systems where Unitree's precompiled serial `runParse`
