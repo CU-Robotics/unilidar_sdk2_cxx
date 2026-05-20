@@ -92,7 +92,7 @@ mod ffi {
         fn startLidarRotation(self: Pin<&mut LidarWrapper>);
         fn stopLidarRotation(self: Pin<&mut LidarWrapper>);
         fn setLidarWorkMode(self: Pin<&mut LidarWrapper>, mode: u32);
-        fn getPointCloud(self: Pin<&mut LidarWrapper>, rustPointCloud: &mut PointCloud);
+        fn getPointCloud(self: Pin<&mut LidarWrapper>, rustPointCloud: &mut PointCloud) -> bool;
         fn getImuData(self: Pin<&mut LidarWrapper>, rustImuData: &mut ImuData);
     }
 }
@@ -253,14 +253,27 @@ impl UnilidarL2 {
     // From a performance standpoint it could be faster to get the PointData2D, copy it to rust, and then parse it
     // from inside rust. Unsure, will have to test.
     pub fn get_point_cloud(&mut self) -> PointCloud {
+        self.try_get_point_cloud().unwrap_or(PointCloud {
+            stamp: 0.0,
+            id: 0,
+            ring_num: 0,
+            points: Vec::new(),
+        })
+    }
+
+    /// Gets the latest parsed point cloud if the SDK has accumulated a complete cloud.
+    pub fn try_get_point_cloud(&mut self) -> Option<PointCloud> {
         let mut point_cloud = PointCloud {
             stamp: 0.0,
             id: 0,
             ring_num: 0,
             points: Vec::new(),
         };
-        self.lidar_wrapper.pin_mut().getPointCloud(&mut point_cloud);
-        point_cloud
+        if self.lidar_wrapper.pin_mut().getPointCloud(&mut point_cloud) {
+            Some(point_cloud)
+        } else {
+            None
+        }
     }
 
     pub fn get_imu_data(&mut self) -> ImuData {
