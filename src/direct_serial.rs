@@ -1,9 +1,10 @@
 use crate::{
-    LIDAR_2D_POINT_DATA_PACKET_TYPE, LIDAR_ACK_DATA_PACKET_TYPE, LIDAR_IMU_DATA_PACKET_TYPE,
-    LIDAR_IP_ADDRESS_CONFIG_PACKET_TYPE, LIDAR_MAC_ADDRESS_CONFIG_PACKET_TYPE,
-    LIDAR_PARAM_DATA_PACKET_TYPE, LIDAR_POINT_DATA_PACKET_TYPE, LIDAR_TIME_STAMP_PACKET_TYPE,
-    LIDAR_USER_CMD_PACKET_TYPE, LIDAR_VERSION_PACKET_TYPE, LIDAR_WORK_MODE_CONFIG_PACKET_TYPE,
-    LidarPacket, Point, PointCloud, SerialConfig, UdpConfig,
+    DataInfo, ImuData, LIDAR_2D_POINT_DATA_PACKET_TYPE, LIDAR_ACK_DATA_PACKET_TYPE,
+    LIDAR_IMU_DATA_PACKET_TYPE, LIDAR_IP_ADDRESS_CONFIG_PACKET_TYPE,
+    LIDAR_MAC_ADDRESS_CONFIG_PACKET_TYPE, LIDAR_PARAM_DATA_PACKET_TYPE,
+    LIDAR_POINT_DATA_PACKET_TYPE, LIDAR_TIME_STAMP_PACKET_TYPE, LIDAR_USER_CMD_PACKET_TYPE,
+    LIDAR_VERSION_PACKET_TYPE, LIDAR_WORK_MODE_CONFIG_PACKET_TYPE, LidarPacket, Point, PointCloud,
+    SerialConfig, UdpConfig, ffi,
 };
 use std::env;
 use std::fs::{File, OpenOptions};
@@ -146,6 +147,7 @@ pub struct DirectSerialRead {
     pub bytes_read: usize,
     pub packet: Option<DirectSerialPacket>,
     pub point_cloud: Option<PointCloud>,
+    pub imu_data: Option<ImuData>,
 }
 
 /// Direct serial point-cloud reader for systems where Unitree's precompiled serial `runParse`
@@ -333,11 +335,18 @@ fn read_from_frame(frame: &[u8]) -> DirectSerialRead {
         DirectSerialPacket::PointData => parse_point_cloud(frame),
         DirectSerialPacket::PointData2D | DirectSerialPacket::Other(_) => None,
     };
+    let imu_data = match direct_packet {
+        DirectSerialPacket::Other(LIDAR_IMU_DATA_PACKET_TYPE) => parse_imu_data(frame),
+        DirectSerialPacket::PointData
+        | DirectSerialPacket::PointData2D
+        | DirectSerialPacket::Other(_) => None,
+    };
 
     DirectSerialRead {
         bytes_read: 0,
         packet: Some(direct_packet),
         point_cloud,
+        imu_data,
     }
 }
 
@@ -448,6 +457,32 @@ fn parse_point_cloud(frame: &[u8]) -> Option<PointCloud> {
         id: 1,
         ring_num: 1,
         points,
+    })
+}
+
+fn parse_imu_data(frame: &[u8]) -> Option<ImuData> {
+    let data = frame.get(12..)?;
+    if data.len() < 56 {
+        return None;
+    }
+
+    Some(ImuData {
+        info: DataInfo {
+            seq: le_u32(data, 0),
+            payload_size: le_u32(data, 4),
+            stamp: ffi::TimeStamp {
+                sec: le_u32(data, 8),
+                nsec: le_u32(data, 12),
+            },
+        },
+        quaternion: [
+            le_f32(data, 16),
+            le_f32(data, 20),
+            le_f32(data, 24),
+            le_f32(data, 28),
+        ],
+        angular_velocity: [le_f32(data, 32), le_f32(data, 36), le_f32(data, 40)],
+        linear_acceleration: [le_f32(data, 44), le_f32(data, 48), le_f32(data, 52)],
     })
 }
 
