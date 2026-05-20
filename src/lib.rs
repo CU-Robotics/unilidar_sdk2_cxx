@@ -14,13 +14,25 @@ use std::time::Duration;
 use thiserror::Error;
 
 const FRAME_HEADER: [u8; 4] = [0x55, 0xaa, 0x05, 0x0a];
+const LIDAR_USER_CMD_PACKET_TYPE: u32 = 100;
+const LIDAR_ACK_DATA_PACKET_TYPE: u32 = 101;
 const LIDAR_POINT_DATA_PACKET_TYPE: u32 = 102;
 const LIDAR_2D_POINT_DATA_PACKET_TYPE: u32 = 103;
+const LIDAR_IMU_DATA_PACKET_TYPE: u32 = 104;
+const LIDAR_VERSION_PACKET_TYPE: u32 = 105;
+const LIDAR_TIME_STAMP_PACKET_TYPE: u32 = 106;
+const LIDAR_WORK_MODE_CONFIG_PACKET_TYPE: u32 = 107;
 const LIDAR_IP_ADDRESS_CONFIG_PACKET_TYPE: u32 = 108;
+const LIDAR_MAC_ADDRESS_CONFIG_PACKET_TYPE: u32 = 109;
+const LIDAR_PARAM_DATA_PACKET_TYPE: u32 = 2001;
 const LIDAR_WORK_MODE_COMMAND_PACKET_TYPE: u32 = 2002;
 const MAX_FRAME_SIZE: usize = 6_000;
 const DEFAULT_SERIAL_PORT: &str = "/dev/ttyACM0";
 const LIDAR_SERIAL_BY_ID: &str = "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A2A026768-if00";
+const USER_CMD_RESET_TYPE: u32 = 1;
+const USER_CMD_STANDBY_TYPE: u32 = 2;
+const USER_CMD_STANDBY_START: u32 = 0;
+const USER_CMD_STANDBY_STOP: u32 = 1;
 
 #[cxx::bridge]
 mod ffi {
@@ -152,17 +164,32 @@ pub enum LidarPacket {
 /// A wrapper around the C++ Unilidar SDK2. Only some of the functions are translated.
 pub struct UnilidarL2 {
     lidar_wrapper: UniquePtr<LidarWrapper>,
+    direct_serial: Option<SerialPointCloudReader>,
+    direct_serial_config: Option<SerialConfig>,
+    direct_serial_cloud: Option<PointCloud>,
 }
 
 impl UnilidarL2 {
     pub fn new() -> Self {
         Self {
             lidar_wrapper: ffi::createLidarWrapper(),
+            direct_serial: None,
+            direct_serial_config: None,
+            direct_serial_cloud: None,
         }
     }
 
     /// Initialize a serial connection to a Unitree L2 lidar. Returns `SerialInitializationError` if the connection couldn't be made.
     pub fn initialize_serial(
+        &mut self,
+        config: SerialConfig,
+    ) -> Result<(), SerialInitializationError> {
+        self.initialize_serial_sdk(config)
+    }
+
+    /// Initialize the C++ SDK serial path. On some hosts this opens the tty but does not surface
+    /// parsed packets; use `initialize_serial_direct` for the direct Rust packet reader.
+    pub fn initialize_serial_sdk(
         &mut self,
         config: SerialConfig,
     ) -> Result<(), SerialInitializationError> {
@@ -180,9 +207,27 @@ impl UnilidarL2 {
         }
     }
 
+    /// Initialize a serial connection using the Rust direct packet reader.
+    ///
+    /// In this mode, `run_parse` and `try_get_point_cloud` are backed by direct frame parsing, while
+    /// control methods such as `start_lidar_rotation`, `stop_lidar_rotation`, `reset_lidar`, and
+    /// `set_lidar_work_mode` send command frames over the same serial device.
+    pub fn initialize_serial_direct(
+        &mut self,
+        config: SerialConfig,
+    ) -> Result<(), DirectSerialError> {
+        self.direct_serial = Some(SerialPointCloudReader::open(config.clone())?);
+        self.direct_serial_config = Some(config);
+        self.direct_serial_cloud = None;
+        Ok(())
+    }
+
     /// Close the serial connection to a Unitree L2 lidar.
     /// Unsure what the return value represents. Possibly `true` if the connection was closed, and `false` if it wasn't.
     pub fn close_serial(&mut self) -> bool {
+        self.direct_serial = None;
+        self.direct_serial_config = None;
+        self.direct_serial_cloud = None;
         self.lidar_wrapper.pin_mut().closeSerial()
     }
 
@@ -235,6 +280,18 @@ impl UnilidarL2 {
     /// Gets the next packet sent by the lidar and parses it.
     /// The return value is the type of packet received.
     pub fn run_parse(&mut self) -> LidarPacket {
+        if let Some(reader) = self.direct_serial.as_mut() {
+            return match reader.read_next() {
+                Ok(read) => {
+                    self.direct_serial_cloud = read.point_cloud;
+                    read.packet
+                        .map(LidarPacket::from)
+                        .unwrap_or(LidarPacket::NoPacket)
+                }
+                Err(error) => panic!("direct serial read failed: {error}"),
+            };
+        }
+
         // These are from unitree_lidar_protocol.h
         const LIDAR_USER_CMD_PACKET_TYPE: i32 = 100;
         const LIDAR_ACK_DATA_PACKET_TYPE: i32 = 101;
@@ -273,14 +330,41 @@ impl UnilidarL2 {
     }
 
     pub fn reset_lidar(&mut self) {
+        if let Some(config) = &self.direct_serial_config {
+            if let Err(error) = send_lidar_user_control_serial(config, USER_CMD_RESET_TYPE, 0) {
+                eprintln!("failed to reset lidar over serial: {error}");
+            }
+            return;
+        }
+
         self.lidar_wrapper.pin_mut().resetLidar();
     }
 
     pub fn start_lidar_rotation(&mut self) {
+        if let Some(config) = &self.direct_serial_config {
+            if let Err(error) = send_lidar_user_control_serial(
+                config,
+                USER_CMD_STANDBY_TYPE,
+                USER_CMD_STANDBY_START,
+            ) {
+                eprintln!("failed to start lidar rotation over serial: {error}");
+            }
+            return;
+        }
+
         self.lidar_wrapper.pin_mut().startLidarRotation();
     }
 
     pub fn stop_lidar_rotation(&mut self) {
+        if let Some(config) = &self.direct_serial_config {
+            if let Err(error) =
+                send_lidar_user_control_serial(config, USER_CMD_STANDBY_TYPE, USER_CMD_STANDBY_STOP)
+            {
+                eprintln!("failed to stop lidar rotation over serial: {error}");
+            }
+            return;
+        }
+
         self.lidar_wrapper.pin_mut().stopLidarRotation();
     }
 
@@ -288,6 +372,13 @@ impl UnilidarL2 {
     /// actually emit point/IMU packets over the serial link — without it the connection opens but
     /// stays silent. Other modes exist but are not documented in the SDK.
     pub fn set_lidar_work_mode(&mut self, mode: u32) {
+        if let Some(config) = &self.direct_serial_config {
+            if let Err(error) = set_lidar_work_mode_serial(config.clone(), mode) {
+                eprintln!("failed to set lidar work mode over serial: {error}");
+            }
+            return;
+        }
+
         self.lidar_wrapper.pin_mut().setLidarWorkMode(mode);
     }
 
@@ -305,6 +396,10 @@ impl UnilidarL2 {
 
     /// Gets the latest parsed point cloud if the SDK has accumulated a complete cloud.
     pub fn try_get_point_cloud(&mut self) -> Option<PointCloud> {
+        if self.direct_serial.is_some() {
+            return self.direct_serial_cloud.take();
+        }
+
         let mut point_cloud = PointCloud {
             stamp: 0.0,
             id: 0,
@@ -428,7 +523,7 @@ impl Default for UnilidarL2 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 /// Configuration for a lidar using a serial connection. Passed to `UnilidarL2.initialize_serial`
 pub struct SerialConfig {
     pub port: String,
@@ -514,6 +609,27 @@ pub enum DirectSerialPacket {
     PointData,
     PointData2D,
     Other(u32),
+}
+
+impl From<DirectSerialPacket> for LidarPacket {
+    fn from(packet: DirectSerialPacket) -> Self {
+        match packet {
+            DirectSerialPacket::PointData => Self::PointData,
+            DirectSerialPacket::PointData2D => Self::PointData2D,
+            DirectSerialPacket::Other(LIDAR_USER_CMD_PACKET_TYPE) => Self::UserCmd,
+            DirectSerialPacket::Other(LIDAR_ACK_DATA_PACKET_TYPE) => Self::AckData,
+            DirectSerialPacket::Other(LIDAR_IMU_DATA_PACKET_TYPE) => Self::ImuData,
+            DirectSerialPacket::Other(LIDAR_VERSION_PACKET_TYPE) => Self::LidarVersion,
+            DirectSerialPacket::Other(LIDAR_TIME_STAMP_PACKET_TYPE) => Self::TimeStamp,
+            DirectSerialPacket::Other(LIDAR_WORK_MODE_CONFIG_PACKET_TYPE) => Self::WorkModeConfig,
+            DirectSerialPacket::Other(LIDAR_IP_ADDRESS_CONFIG_PACKET_TYPE) => Self::IpAddressConfig,
+            DirectSerialPacket::Other(LIDAR_MAC_ADDRESS_CONFIG_PACKET_TYPE) => {
+                Self::MacAddressConfig
+            }
+            DirectSerialPacket::Other(LIDAR_PARAM_DATA_PACKET_TYPE) => Self::ParamData,
+            DirectSerialPacket::Other(_) => Self::NoPacket,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -658,6 +774,44 @@ pub fn set_lidar_udp_config_serial(
         .and_then(|()| serial.flush())
         .map_err(|source| DirectSerialError::Write {
             port: serial_config.port,
+            source,
+        })
+}
+
+pub fn reset_lidar_serial(config: SerialConfig) -> Result<(), DirectSerialError> {
+    send_lidar_user_control_serial(&config, USER_CMD_RESET_TYPE, 0)
+}
+
+pub fn start_lidar_rotation_serial(config: SerialConfig) -> Result<(), DirectSerialError> {
+    send_lidar_user_control_serial(&config, USER_CMD_STANDBY_TYPE, USER_CMD_STANDBY_START)
+}
+
+pub fn stop_lidar_rotation_serial(config: SerialConfig) -> Result<(), DirectSerialError> {
+    send_lidar_user_control_serial(&config, USER_CMD_STANDBY_TYPE, USER_CMD_STANDBY_STOP)
+}
+
+fn send_lidar_user_control_serial(
+    config: &SerialConfig,
+    cmd_type: u32,
+    cmd_value: u32,
+) -> Result<(), DirectSerialError> {
+    configure_tty(&config.port, config.baudrate)?;
+
+    let mut serial = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&config.port)
+        .map_err(|source| DirectSerialError::Open {
+            port: config.port.clone(),
+            source,
+        })?;
+
+    let frame = user_control_command_frame(cmd_type, cmd_value);
+    serial
+        .write_all(&frame)
+        .and_then(|()| serial.flush())
+        .map_err(|source| DirectSerialError::Write {
+            port: config.port.clone(),
             source,
         })
 }
@@ -861,6 +1015,23 @@ fn work_mode_command_frame(mode: u32) -> [u8; 28] {
     frame[16..20].copy_from_slice(&crc.to_le_bytes());
     frame[26] = 0x00;
     frame[27] = 0xff;
+    frame
+}
+
+fn user_control_command_frame(cmd_type: u32, cmd_value: u32) -> [u8; 32] {
+    let mut data = [0u8; 8];
+    data[0..4].copy_from_slice(&cmd_type.to_le_bytes());
+    data[4..8].copy_from_slice(&cmd_value.to_le_bytes());
+    let crc = crc32(&data);
+
+    let mut frame = [0u8; 32];
+    frame[0..4].copy_from_slice(&FRAME_HEADER);
+    frame[4..8].copy_from_slice(&LIDAR_USER_CMD_PACKET_TYPE.to_le_bytes());
+    frame[8..12].copy_from_slice(&32u32.to_le_bytes());
+    frame[12..20].copy_from_slice(&data);
+    frame[20..24].copy_from_slice(&crc.to_le_bytes());
+    frame[30] = 0x00;
+    frame[31] = 0xff;
     frame
 }
 
