@@ -22,7 +22,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     sleep(Duration::from_secs(1));
     println!("Stopping");
     lidar.stop_lidar_rotation();
-    sleep(Duration::from_secs(10));
+    sleep(Duration::from_secs(1));
     println!("starting up again");
     lidar.start_lidar_rotation();
 
