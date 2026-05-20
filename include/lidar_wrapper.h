@@ -45,7 +45,7 @@ public:
     void startLidarRotation();
     void stopLidarRotation();
     void setLidarWorkMode(uint32_t mode);
-    void getPointCloud(PointCloud& rustPointCloud);
+    bool getPointCloud(PointCloud& rustPointCloud);
     void getImuData(ImuData& rustImuData);
 };
 

@@ -68,8 +68,12 @@ void LidarWrapper::setLidarWorkMode(uint32_t mode) {
     this->lidarReader->setLidarWorkMode(mode);
 }
 
-void LidarWrapper::getPointCloud(PointCloud& rustPointCloud) {
-    this->lidarReader->getPointCloud(this->pointCloud);
+bool LidarWrapper::getPointCloud(PointCloud& rustPointCloud) {
+    if (!this->lidarReader->getPointCloud(this->pointCloud)) {
+        rustPointCloud.points.clear();
+        return false;
+    }
+
     rustPointCloud.stamp = this->pointCloud.stamp;
     rustPointCloud.id = this->pointCloud.id;
     rustPointCloud.ring_num = this->pointCloud.ringNum;
@@ -87,6 +91,8 @@ void LidarWrapper::getPointCloud(PointCloud& rustPointCloud) {
 
         rustPointCloud.points.push_back(rustPoint);
     }
+
+    return true;
 }
 
 void LidarWrapper::getImuData(ImuData& rustImuData) {

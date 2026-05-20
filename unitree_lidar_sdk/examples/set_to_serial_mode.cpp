@@ -10,8 +10,8 @@ int main(int argc, char *argv[])
     // Initialize
     UnitreeLidarReader *lreader = createUnitreeLidarReader();
 
-    std::string lidar_ip = "192.168.1.62";
-    std::string local_ip = "192.168.1.2";
+    std::string lidar_ip = "192.168.123.110";
+    std::string local_ip = "192.168.123.120";
 
     unsigned short lidar_port = 6101;
     unsigned short local_port = 6201;
@@ -31,12 +31,9 @@ int main(int argc, char *argv[])
     // Set lidar work mode
     std::cout << "set Lidar to serial mode" << std::endl;
     lreader->setLidarWorkMode(8);
-    sleep(1);
-
-    std::cout << "reset Lidar to apply mode" << std::endl;
-    lreader->resetLidar();
-    sleep(2);
-
     std::cout << "done" << std::endl;
+    sleep(1);
+    
+
     return 0;
 }

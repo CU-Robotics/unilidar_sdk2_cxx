@@ -1,8 +1,28 @@
+pub use crate::direct_serial::{
+    DirectSerialError, DirectSerialPacket, DirectSerialRead, SerialPointCloudReader,
+    reset_lidar_serial, set_lidar_udp_config_serial, set_lidar_work_mode_serial,
+    start_lidar_rotation_serial, stop_lidar_rotation_serial,
+};
 pub use crate::ffi::{DataInfo, ImuData, Point, PointCloud};
 
 use crate::ffi::LidarWrapper;
 use cxx::UniquePtr;
+use std::time::Duration;
 use thiserror::Error;
+
+mod direct_serial;
+
+pub(crate) const LIDAR_USER_CMD_PACKET_TYPE: u32 = 100;
+pub(crate) const LIDAR_ACK_DATA_PACKET_TYPE: u32 = 101;
+pub(crate) const LIDAR_POINT_DATA_PACKET_TYPE: u32 = 102;
+pub(crate) const LIDAR_2D_POINT_DATA_PACKET_TYPE: u32 = 103;
+pub(crate) const LIDAR_IMU_DATA_PACKET_TYPE: u32 = 104;
+pub(crate) const LIDAR_VERSION_PACKET_TYPE: u32 = 105;
+pub(crate) const LIDAR_TIME_STAMP_PACKET_TYPE: u32 = 106;
+pub(crate) const LIDAR_WORK_MODE_CONFIG_PACKET_TYPE: u32 = 107;
+pub(crate) const LIDAR_IP_ADDRESS_CONFIG_PACKET_TYPE: u32 = 108;
+pub(crate) const LIDAR_MAC_ADDRESS_CONFIG_PACKET_TYPE: u32 = 109;
+pub(crate) const LIDAR_PARAM_DATA_PACKET_TYPE: u32 = 2001;
 
 #[cxx::bridge]
 mod ffi {
@@ -92,7 +112,7 @@ mod ffi {
         fn startLidarRotation(self: Pin<&mut LidarWrapper>);
         fn stopLidarRotation(self: Pin<&mut LidarWrapper>);
         fn setLidarWorkMode(self: Pin<&mut LidarWrapper>, mode: u32);
-        fn getPointCloud(self: Pin<&mut LidarWrapper>, rustPointCloud: &mut PointCloud);
+        fn getPointCloud(self: Pin<&mut LidarWrapper>, rustPointCloud: &mut PointCloud) -> bool;
         fn getImuData(self: Pin<&mut LidarWrapper>, rustImuData: &mut ImuData);
     }
 }
@@ -134,17 +154,32 @@ pub enum LidarPacket {
 /// A wrapper around the C++ Unilidar SDK2. Only some of the functions are translated.
 pub struct UnilidarL2 {
     lidar_wrapper: UniquePtr<LidarWrapper>,
+    direct_serial: Option<SerialPointCloudReader>,
+    direct_serial_config: Option<SerialConfig>,
+    direct_serial_cloud: Option<PointCloud>,
 }
 
 impl UnilidarL2 {
     pub fn new() -> Self {
         Self {
             lidar_wrapper: ffi::createLidarWrapper(),
+            direct_serial: None,
+            direct_serial_config: None,
+            direct_serial_cloud: None,
         }
     }
 
     /// Initialize a serial connection to a Unitree L2 lidar. Returns `SerialInitializationError` if the connection couldn't be made.
     pub fn initialize_serial(
+        &mut self,
+        config: SerialConfig,
+    ) -> Result<(), SerialInitializationError> {
+        self.initialize_serial_sdk(config)
+    }
+
+    /// Initialize the C++ SDK serial path. On some hosts this opens the tty but does not surface
+    /// parsed packets; use `initialize_serial_direct` for the direct Rust packet reader.
+    pub fn initialize_serial_sdk(
         &mut self,
         config: SerialConfig,
     ) -> Result<(), SerialInitializationError> {
@@ -162,9 +197,27 @@ impl UnilidarL2 {
         }
     }
 
+    /// Initialize a serial connection using the Rust direct packet reader.
+    ///
+    /// In this mode, `run_parse` and `try_get_point_cloud` are backed by direct frame parsing, while
+    /// control methods such as `start_lidar_rotation`, `stop_lidar_rotation`, `reset_lidar`, and
+    /// `set_lidar_work_mode` send command frames over the same serial device.
+    pub fn initialize_serial_direct(
+        &mut self,
+        config: SerialConfig,
+    ) -> Result<(), DirectSerialError> {
+        self.direct_serial = Some(SerialPointCloudReader::open(config.clone())?);
+        self.direct_serial_config = Some(config);
+        self.direct_serial_cloud = None;
+        Ok(())
+    }
+
     /// Close the serial connection to a Unitree L2 lidar.
     /// Unsure what the return value represents. Possibly `true` if the connection was closed, and `false` if it wasn't.
     pub fn close_serial(&mut self) -> bool {
+        self.direct_serial = None;
+        self.direct_serial_config = None;
+        self.direct_serial_cloud = None;
         self.lidar_wrapper.pin_mut().closeSerial()
     }
 
@@ -186,6 +239,30 @@ impl UnilidarL2 {
         }
     }
 
+    /// Initialize UDP mode and perform the startup sequence needed for point-cloud packets.
+    ///
+    /// Unitree's UDP example starts rotation, sets work mode `0`, resets the lidar, then starts
+    /// rotation again. Skipping the final start can leave IMU packets flowing without point data.
+    pub fn initialize_udp_streaming(
+        &mut self,
+        config: UdpConfig,
+    ) -> Result<(), UdpInitializationError> {
+        self.initialize_udp(config)?;
+        self.start_lidar_rotation();
+        std::thread::sleep(Duration::from_secs(1));
+
+        self.set_lidar_work_mode(UDP_WORK_MODE);
+        std::thread::sleep(Duration::from_secs(1));
+
+        self.reset_lidar();
+        std::thread::sleep(Duration::from_secs(2));
+
+        self.start_lidar_rotation();
+        std::thread::sleep(Duration::from_secs(3));
+
+        Ok(())
+    }
+
     pub fn close_udp(&mut self) -> bool {
         self.lidar_wrapper.pin_mut().closeUDP()
     }
@@ -193,6 +270,18 @@ impl UnilidarL2 {
     /// Gets the next packet sent by the lidar and parses it.
     /// The return value is the type of packet received.
     pub fn run_parse(&mut self) -> LidarPacket {
+        if let Some(reader) = self.direct_serial.as_mut() {
+            return match reader.read_next() {
+                Ok(read) => {
+                    self.direct_serial_cloud = read.point_cloud;
+                    read.packet
+                        .map(LidarPacket::from)
+                        .unwrap_or(LidarPacket::NoPacket)
+                }
+                Err(error) => panic!("direct serial read failed: {error}"),
+            };
+        }
+
         // These are from unitree_lidar_protocol.h
         const LIDAR_USER_CMD_PACKET_TYPE: i32 = 100;
         const LIDAR_ACK_DATA_PACKET_TYPE: i32 = 101;
@@ -231,14 +320,35 @@ impl UnilidarL2 {
     }
 
     pub fn reset_lidar(&mut self) {
+        if let Some(config) = &self.direct_serial_config {
+            if let Err(error) = reset_lidar_serial(config.clone()) {
+                eprintln!("failed to reset lidar over serial: {error}");
+            }
+            return;
+        }
+
         self.lidar_wrapper.pin_mut().resetLidar();
     }
 
     pub fn start_lidar_rotation(&mut self) {
+        if let Some(config) = &self.direct_serial_config {
+            if let Err(error) = start_lidar_rotation_serial(config.clone()) {
+                eprintln!("failed to start lidar rotation over serial: {error}");
+            }
+            return;
+        }
+
         self.lidar_wrapper.pin_mut().startLidarRotation();
     }
 
     pub fn stop_lidar_rotation(&mut self) {
+        if let Some(config) = &self.direct_serial_config {
+            if let Err(error) = stop_lidar_rotation_serial(config.clone()) {
+                eprintln!("failed to stop lidar rotation over serial: {error}");
+            }
+            return;
+        }
+
         self.lidar_wrapper.pin_mut().stopLidarRotation();
     }
 
@@ -246,6 +356,13 @@ impl UnilidarL2 {
     /// actually emit point/IMU packets over the serial link — without it the connection opens but
     /// stays silent. Other modes exist but are not documented in the SDK.
     pub fn set_lidar_work_mode(&mut self, mode: u32) {
+        if let Some(config) = &self.direct_serial_config {
+            if let Err(error) = set_lidar_work_mode_serial(config.clone(), mode) {
+                eprintln!("failed to set lidar work mode over serial: {error}");
+            }
+            return;
+        }
+
         self.lidar_wrapper.pin_mut().setLidarWorkMode(mode);
     }
 
@@ -253,14 +370,31 @@ impl UnilidarL2 {
     // From a performance standpoint it could be faster to get the PointData2D, copy it to rust, and then parse it
     // from inside rust. Unsure, will have to test.
     pub fn get_point_cloud(&mut self) -> PointCloud {
+        self.try_get_point_cloud().unwrap_or(PointCloud {
+            stamp: 0.0,
+            id: 0,
+            ring_num: 0,
+            points: Vec::new(),
+        })
+    }
+
+    /// Gets the latest parsed point cloud if the SDK has accumulated a complete cloud.
+    pub fn try_get_point_cloud(&mut self) -> Option<PointCloud> {
+        if self.direct_serial.is_some() {
+            return self.direct_serial_cloud.take();
+        }
+
         let mut point_cloud = PointCloud {
             stamp: 0.0,
             id: 0,
             ring_num: 0,
             points: Vec::new(),
         };
-        self.lidar_wrapper.pin_mut().getPointCloud(&mut point_cloud);
-        point_cloud
+        if self.lidar_wrapper.pin_mut().getPointCloud(&mut point_cloud) {
+            Some(point_cloud)
+        } else {
+            None
+        }
     }
 
     pub fn get_imu_data(&mut self) -> ImuData {
@@ -276,6 +410,49 @@ impl UnilidarL2 {
         };
         self.lidar_wrapper.pin_mut().getImuData(&mut imu_data);
         imu_data
+    }
+}
+
+const UDP_WORK_MODE: u32 = 0;
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LidarPacketCounts {
+    pub point_packets: u64,
+    pub point_2d_packets: u64,
+    pub imu_packets: u64,
+    pub ack_packets: u64,
+    pub param_packets: u64,
+    pub no_packets: u64,
+    pub other_packets: u64,
+}
+
+impl LidarPacketCounts {
+    pub fn record(&mut self, packet: &LidarPacket) {
+        match packet {
+            LidarPacket::PointData => self.point_packets += 1,
+            LidarPacket::PointData2D => self.point_2d_packets += 1,
+            LidarPacket::ImuData => self.imu_packets += 1,
+            LidarPacket::AckData => self.ack_packets += 1,
+            LidarPacket::ParamData => self.param_packets += 1,
+            LidarPacket::NoPacket => self.no_packets += 1,
+            _ => self.other_packets += 1,
+        }
+    }
+}
+
+impl std::fmt::Display for LidarPacketCounts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "point_packets={} point_2d_packets={} imu_packets={} ack_packets={} param_packets={} other_packets={} no_packets={}",
+            self.point_packets,
+            self.point_2d_packets,
+            self.imu_packets,
+            self.ack_packets,
+            self.param_packets,
+            self.other_packets,
+            self.no_packets
+        )
     }
 }
 
@@ -297,7 +474,7 @@ impl Default for UnilidarL2 {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 /// Configuration for a lidar using a serial connection. Passed to `UnilidarL2.initialize_serial`
 pub struct SerialConfig {
     pub port: String,
@@ -320,13 +497,6 @@ impl Default for SerialConfig {
             range_min: 0.0,
             range_max: 100.0,
         }
-    }
-}
-
-impl SerialConfig {
-    pub fn port(mut self, port: impl Into<String>) -> Self {
-        self.port = port.into();
-        self
     }
 }
 
