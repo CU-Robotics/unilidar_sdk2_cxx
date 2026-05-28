@@ -19,6 +19,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut lidar = UnilidarL2::new();
     lidar.initialize_serial_direct(config)?;
 
+    println!("setting work mode to 8 (serial)");
+    lidar.set_lidar_work_mode(8);
+    sleep(Duration::from_secs(1));
+    println!("resetting lidar to apply mode");
+    lidar.reset_lidar();
+    sleep(Duration::from_secs(3));
+
     sleep(Duration::from_secs(1));
     println!("Stopping");
     lidar.stop_lidar_rotation();
