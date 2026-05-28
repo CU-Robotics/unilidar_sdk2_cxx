@@ -60,7 +60,7 @@ mod ffi {
         pub nsec: u32,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct Point {
         pub x: f32,
         pub y: f32,
@@ -70,7 +70,7 @@ mod ffi {
         pub ring: u32,
     }
 
-    #[derive(Debug)]
+    #[derive(Debug, Clone)]
     struct PointCloud {
         pub stamp: f64,
         pub id: u32,
@@ -524,7 +524,7 @@ impl Default for SerialConfig {
 }
 
 /// Configuration for a lidar using a UDP/Ethernet connection. Passed to `UnilidarL2::initialize_udp`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UdpConfig {
     pub lidar_port: u16,
     pub lidar_ip: String,
