@@ -158,6 +158,8 @@ pub struct SerialPointCloudReader {
     serial: File,
     read_buf: [u8; 8192],
     frame_buf: Vec<u8>,
+    range_min: f32,
+    range_max: f32,
 }
 
 impl SerialPointCloudReader {
@@ -173,6 +175,8 @@ impl SerialPointCloudReader {
             serial,
             read_buf: [0; 8192],
             frame_buf: Vec::with_capacity(MAX_FRAME_SIZE * 2),
+            range_min: config.range_min,
+            range_max: config.range_max,
         })
     }
 
@@ -183,7 +187,7 @@ impl SerialPointCloudReader {
     pub fn read_next(&mut self) -> Result<DirectSerialRead, DirectSerialError> {
         loop {
             if let Some(frame) = next_frame(&mut self.frame_buf) {
-                return Ok(read_from_frame(&frame));
+                return Ok(read_from_frame(&frame, self.range_min, self.range_max));
             }
 
             let bytes_read =
@@ -199,7 +203,7 @@ impl SerialPointCloudReader {
                     .extend_from_slice(&self.read_buf[..bytes_read]);
 
                 if let Some(frame) = next_frame(&mut self.frame_buf) {
-                    let mut read = read_from_frame(&frame);
+                    let mut read = read_from_frame(&frame, self.range_min, self.range_max);
                     read.bytes_read = bytes_read;
                     return Ok(read);
                 }
@@ -323,7 +327,7 @@ fn configure_tty(port: &str, baudrate: u32) -> Result<(), DirectSerialError> {
     }
 }
 
-fn read_from_frame(frame: &[u8]) -> DirectSerialRead {
+fn read_from_frame(frame: &[u8], range_min: f32, range_max: f32) -> DirectSerialRead {
     let packet = packet_type(frame);
     let direct_packet = match packet {
         LIDAR_POINT_DATA_PACKET_TYPE => DirectSerialPacket::PointData,
@@ -332,7 +336,7 @@ fn read_from_frame(frame: &[u8]) -> DirectSerialRead {
     };
 
     let point_cloud = match direct_packet {
-        DirectSerialPacket::PointData => parse_point_cloud(frame),
+        DirectSerialPacket::PointData => parse_point_cloud(frame, range_min, range_max),
         DirectSerialPacket::PointData2D | DirectSerialPacket::Other(_) => None,
     };
     let imu_data = match direct_packet {
@@ -380,7 +384,7 @@ fn packet_type(frame: &[u8]) -> u32 {
     le_u32(frame, 4)
 }
 
-fn parse_point_cloud(frame: &[u8]) -> Option<PointCloud> {
+fn parse_point_cloud(frame: &[u8], config_range_min: f32, config_range_max: f32) -> Option<PointCloud> {
     let data = frame.get(12..)?;
 
     let a_axis_dist = le_f32(data, 52);
@@ -426,7 +430,13 @@ fn parse_point_cloud(frame: &[u8]) -> Option<PointCloud> {
         let range_raw = le_u16(data, ranges_offset + j * 2);
         if range_raw >= 1 {
             let range = range_scale * (range_raw as f32 + range_bias);
-            if range >= range_min && range <= range_max {
+            // Match the C++ SDK: filter by the packet's own bounds, then further
+            // constrain by the user-supplied config bounds.
+            if range >= range_min
+                && range <= range_max
+                && range >= config_range_min
+                && range <= config_range_max
+            {
                 let sin_alpha = alpha_cur.sin();
                 let cos_alpha = alpha_cur.cos();
                 let sin_theta = theta_cur.sin();
