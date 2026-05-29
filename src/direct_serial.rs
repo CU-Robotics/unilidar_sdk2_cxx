@@ -184,30 +184,44 @@ impl SerialPointCloudReader {
         &self.port
     }
 
+    /// Read one parse cycle. Returns a frame if one is available, otherwise a
+    /// "no packet" read (`packet: None`).
+    ///
+    /// The tty is configured with a read timeout (see `configure_tty`), so a
+    /// serial blip — the device pausing or being unplugged — makes the
+    /// underlying read return zero bytes instead of blocking forever. We surface
+    /// that as a no-packet read so the caller's loop stays responsive and can
+    /// retry, rather than freezing inside the read or spinning on EOF.
     pub fn read_next(&mut self) -> Result<DirectSerialRead, DirectSerialError> {
-        loop {
-            if let Some(frame) = next_frame(&mut self.frame_buf) {
-                return Ok(read_from_frame(&frame, self.range_min, self.range_max));
+        // Hand back any frame already buffered from an earlier read.
+        if let Some(frame) = next_frame(&mut self.frame_buf) {
+            return Ok(read_from_frame(&frame, self.range_min, self.range_max));
+        }
+
+        let bytes_read =
+            self.serial
+                .read(&mut self.read_buf)
+                .map_err(|source| DirectSerialError::Read {
+                    port: self.port.clone(),
+                    source,
+                })?;
+
+        if bytes_read == 0 {
+            // Read timeout (blip) or EOF (unplugged): no data this cycle.
+            return Ok(no_packet(0));
+        }
+
+        self.frame_buf
+            .extend_from_slice(&self.read_buf[..bytes_read]);
+
+        match next_frame(&mut self.frame_buf) {
+            Some(frame) => {
+                let mut read = read_from_frame(&frame, self.range_min, self.range_max);
+                read.bytes_read = bytes_read;
+                Ok(read)
             }
-
-            let bytes_read =
-                self.serial
-                    .read(&mut self.read_buf)
-                    .map_err(|source| DirectSerialError::Read {
-                        port: self.port.clone(),
-                        source,
-                    })?;
-
-            if bytes_read > 0 {
-                self.frame_buf
-                    .extend_from_slice(&self.read_buf[..bytes_read]);
-
-                if let Some(frame) = next_frame(&mut self.frame_buf) {
-                    let mut read = read_from_frame(&frame, self.range_min, self.range_max);
-                    read.bytes_read = bytes_read;
-                    return Ok(read);
-                }
-            }
+            // Got bytes but not a complete frame yet; let the caller loop back.
+            None => Ok(no_packet(bytes_read)),
         }
     }
 }
@@ -311,6 +325,14 @@ fn configure_tty(port: &str, baudrate: u32) -> Result<(), DirectSerialError> {
             "-ixon",
             "-ixoff",
             "-crtscts",
+            // Non-canonical read timeout: return after 0.2s with whatever is
+            // available (VMIN=0, VTIME=2) instead of blocking until a byte
+            // arrives. This is what lets a serial blip surface as a zero-byte
+            // read rather than a frozen reader thread.
+            "min",
+            "0",
+            "time",
+            "2",
         ])
         .status()
         .map_err(|source| DirectSerialError::ConfigureIo {
@@ -324,6 +346,16 @@ fn configure_tty(port: &str, baudrate: u32) -> Result<(), DirectSerialError> {
         Err(DirectSerialError::ConfigureFailed {
             port: port.to_owned(),
         })
+    }
+}
+
+/// A read that produced no packet this cycle (timeout, EOF, or a partial frame).
+fn no_packet(bytes_read: usize) -> DirectSerialRead {
+    DirectSerialRead {
+        bytes_read,
+        packet: None,
+        point_cloud: None,
+        imu_data: None,
     }
 }
 
@@ -384,7 +416,11 @@ fn packet_type(frame: &[u8]) -> u32 {
     le_u32(frame, 4)
 }
 
-fn parse_point_cloud(frame: &[u8], config_range_min: f32, config_range_max: f32) -> Option<PointCloud> {
+fn parse_point_cloud(
+    frame: &[u8],
+    config_range_min: f32,
+    config_range_max: f32,
+) -> Option<PointCloud> {
     let data = frame.get(12..)?;
 
     let a_axis_dist = le_f32(data, 52);

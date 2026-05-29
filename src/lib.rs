@@ -283,7 +283,15 @@ impl UnilidarL2 {
                         .map(LidarPacket::from)
                         .unwrap_or(LidarPacket::NoPacket)
                 }
-                Err(error) => panic!("direct serial read failed: {error}"),
+                Err(error) => {
+                    // A transient read error must not bring down the reader
+                    // thread (panicking here poisons the caller's ring mutex and
+                    // crashes the app). Report it and let the caller retry.
+                    eprintln!("direct serial read failed: {error}");
+                    self.direct_serial_cloud = None;
+                    self.direct_serial_imu = None;
+                    LidarPacket::NoPacket
+                }
             };
         }
 
