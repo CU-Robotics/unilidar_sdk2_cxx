@@ -8,7 +8,9 @@ const TRAIL_LEN: usize = 100;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = SerialConfig {
-        port: "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A2A046145-if00".to_string(),
+        // port: "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A2A046145-if00".to_string(),
+        port: "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A2A026768-if00".to_string(),
+
         baudrate: 4000000,
         // range_min: 0.25,
         ..SerialConfig::default()
@@ -33,13 +35,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let range_min = config.range_min;
     lidar.initialize_serial_direct(config)?;
 
-    lidar.stop_lidar_rotation();
-    sleep(Duration::from_millis(2000));
-    lidar.set_lidar_work_mode(8);
-    lidar.reset_lidar();
-    sleep(Duration::from_millis(1000));
+    // lidar.stop_lidar_rotation();
+    // sleep(Duration::from_millis(2000));
+    // lidar.set_lidar_work_mode(8);
+    // lidar.reset_lidar();
+    // sleep(Duration::from_millis(1000));
 
-    lidar.start_lidar_rotation();
+    // lidar.start_lidar_rotation();
 
     let mut slot = 0usize;
     let mut clouds_logged = 0u64;
