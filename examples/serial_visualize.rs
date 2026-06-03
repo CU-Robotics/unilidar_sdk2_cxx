@@ -36,7 +36,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     lidar.initialize_serial_direct(config)?;
 
     // lidar.stop_lidar_rotation();
-    sleep(Duration::from_millis(2000));
+    // sleep(Duration::from_millis(2000));
     // lidar.set_lidar_work_mode(8);
     // lidar.reset_lidar();
     // sleep(Duration::from_millis(1000));
