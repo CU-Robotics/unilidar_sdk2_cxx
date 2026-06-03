@@ -152,7 +152,8 @@ pub struct DirectSerialRead {
 
 /// Direct serial point-cloud reader for systems where Unitree's precompiled serial `runParse`
 /// path opens the tty but never surfaces packets. This reads the documented SDK packet format
-/// from the serial device and applies the same 3D point transform as `unitree_lidar_utilities.h`.
+/// from the serial device, applies the same 3D point transform as `unitree_lidar_utilities.h`,
+/// and accumulates `SerialConfig::cloud_scan_num` point packets per emitted cloud.
 pub struct SerialPointCloudReader {
     port: String,
     serial: File,
@@ -160,6 +161,7 @@ pub struct SerialPointCloudReader {
     frame_buf: Vec<u8>,
     range_min: f32,
     range_max: f32,
+    point_cloud_assembler: PointCloudAssembler,
 }
 
 impl SerialPointCloudReader {
@@ -177,6 +179,7 @@ impl SerialPointCloudReader {
             frame_buf: Vec::with_capacity(MAX_FRAME_SIZE * 2),
             range_min: config.range_min,
             range_max: config.range_max,
+            point_cloud_assembler: PointCloudAssembler::new(config.cloud_scan_num),
         })
     }
 
@@ -195,7 +198,12 @@ impl SerialPointCloudReader {
     pub fn read_next(&mut self) -> Result<DirectSerialRead, DirectSerialError> {
         // Hand back any frame already buffered from an earlier read.
         if let Some(frame) = next_frame(&mut self.frame_buf) {
-            return Ok(read_from_frame(&frame, self.range_min, self.range_max));
+            return Ok(read_from_frame(
+                &frame,
+                self.range_min,
+                self.range_max,
+                &mut self.point_cloud_assembler,
+            ));
         }
 
         let bytes_read =
@@ -216,7 +224,12 @@ impl SerialPointCloudReader {
 
         match next_frame(&mut self.frame_buf) {
             Some(frame) => {
-                let mut read = read_from_frame(&frame, self.range_min, self.range_max);
+                let mut read = read_from_frame(
+                    &frame,
+                    self.range_min,
+                    self.range_max,
+                    &mut self.point_cloud_assembler,
+                );
                 read.bytes_read = bytes_read;
                 Ok(read)
             }
@@ -359,7 +372,12 @@ fn no_packet(bytes_read: usize) -> DirectSerialRead {
     }
 }
 
-fn read_from_frame(frame: &[u8], range_min: f32, range_max: f32) -> DirectSerialRead {
+fn read_from_frame(
+    frame: &[u8],
+    range_min: f32,
+    range_max: f32,
+    point_cloud_assembler: &mut PointCloudAssembler,
+) -> DirectSerialRead {
     let packet = packet_type(frame);
     let direct_packet = match packet {
         LIDAR_POINT_DATA_PACKET_TYPE => DirectSerialPacket::PointData,
@@ -368,7 +386,8 @@ fn read_from_frame(frame: &[u8], range_min: f32, range_max: f32) -> DirectSerial
     };
 
     let point_cloud = match direct_packet {
-        DirectSerialPacket::PointData => parse_point_cloud(frame, range_min, range_max),
+        DirectSerialPacket::PointData => parse_point_cloud(frame, range_min, range_max)
+            .and_then(|cloud| point_cloud_assembler.push_scan(cloud)),
         DirectSerialPacket::PointData2D | DirectSerialPacket::Other(_) => None,
     };
     let imu_data = match direct_packet {
@@ -383,6 +402,54 @@ fn read_from_frame(frame: &[u8], range_min: f32, range_max: f32) -> DirectSerial
         packet: Some(direct_packet),
         point_cloud,
         imu_data,
+    }
+}
+
+#[derive(Debug)]
+struct PointCloudAssembler {
+    cloud_scan_num: u16,
+    scans_accumulated: u16,
+    pending_cloud: Option<PointCloud>,
+}
+
+impl PointCloudAssembler {
+    fn new(cloud_scan_num: u16) -> Self {
+        Self {
+            cloud_scan_num: cloud_scan_num.max(1),
+            scans_accumulated: 0,
+            pending_cloud: None,
+        }
+    }
+
+    fn push_scan(&mut self, mut scan: PointCloud) -> Option<PointCloud> {
+        if self.cloud_scan_num == 1 {
+            return Some(scan);
+        }
+
+        if self.pending_cloud.is_none() {
+            self.pending_cloud = Some(PointCloud {
+                stamp: scan.stamp,
+                id: scan.id,
+                ring_num: scan.ring_num,
+                points: Vec::with_capacity(scan.points.len() * self.cloud_scan_num as usize),
+            });
+        }
+
+        if let Some(pending_cloud) = self.pending_cloud.as_mut() {
+            let time_offset = (scan.stamp - pending_cloud.stamp) as f32;
+            for point in &mut scan.points {
+                point.time += time_offset;
+            }
+            pending_cloud.points.extend(scan.points);
+        }
+
+        self.scans_accumulated += 1;
+        if self.scans_accumulated >= self.cloud_scan_num {
+            self.scans_accumulated = 0;
+            self.pending_cloud.take()
+        } else {
+            None
+        }
     }
 }
 
@@ -643,4 +710,80 @@ fn crc32(bytes: &[u8]) -> u32 {
     }
 
     !crc
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn point_cloud_assembler_emits_every_scan_when_config_is_one() {
+        let mut assembler = PointCloudAssembler::new(1);
+
+        let cloud = assembler
+            .push_scan(point_cloud(10.0, &[0.1, 0.2]))
+            .expect("cloud should be emitted immediately");
+
+        assert_eq!(cloud.points.len(), 2);
+        assert_eq!(cloud.points[0].time, 0.1);
+        assert_eq!(cloud.points[1].time, 0.2);
+    }
+
+    #[test]
+    fn point_cloud_assembler_waits_for_configured_scan_count() {
+        let mut assembler = PointCloudAssembler::new(3);
+
+        assert!(assembler.push_scan(point_cloud(10.0, &[0.0])).is_none());
+        assert!(assembler.push_scan(point_cloud(10.5, &[0.1])).is_none());
+
+        let cloud = assembler
+            .push_scan(point_cloud(11.0, &[0.2, 0.3]))
+            .expect("third scan should emit an accumulated cloud");
+
+        assert_eq!(cloud.stamp, 10.0);
+        assert_eq!(cloud.points.len(), 4);
+        assert_close(cloud.points[0].time, 0.0);
+        assert_close(cloud.points[1].time, 0.6);
+        assert_close(cloud.points[2].time, 1.2);
+        assert_close(cloud.points[3].time, 1.3);
+
+        assert!(assembler.push_scan(point_cloud(12.0, &[0.4])).is_none());
+    }
+
+    #[test]
+    fn point_cloud_assembler_clamps_zero_scan_count_to_one() {
+        let mut assembler = PointCloudAssembler::new(0);
+
+        let cloud = assembler
+            .push_scan(point_cloud(10.0, &[0.1]))
+            .expect("zero scan count should behave like one");
+
+        assert_eq!(cloud.points.len(), 1);
+    }
+
+    fn point_cloud(stamp: f64, point_times: &[f32]) -> PointCloud {
+        PointCloud {
+            stamp,
+            id: 1,
+            ring_num: 1,
+            points: point_times
+                .iter()
+                .map(|time| Point {
+                    x: 0.0,
+                    y: 0.0,
+                    z: 0.0,
+                    intensity: 1.0,
+                    time: *time,
+                    ring: 1,
+                })
+                .collect(),
+        }
+    }
+
+    fn assert_close(actual: f32, expected: f32) {
+        assert!(
+            (actual - expected).abs() < f32::EPSILON * 8.0,
+            "expected {actual} to be close to {expected}"
+        );
+    }
 }
