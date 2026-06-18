@@ -1,5 +1,5 @@
 use rerun::{Clear, Points3D, RecordingStreamBuilder};
-use std::thread::sleep;
+use std::env;
 use std::time::Duration;
 use std::time::Instant;
 use unilidar_sdk2_cxx::{LidarPacket, LidarPacketCounts, SerialConfig, UnilidarL2};
@@ -7,17 +7,15 @@ use unilidar_sdk2_cxx::{LidarPacket, LidarPacketCounts, SerialConfig, UnilidarL2
 const TRAIL_LEN: usize = 100;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let config = SerialConfig {
-        // port: "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A2A046145-if00".to_string(),
-        port: "/dev/serial/by-id/usb-1a86_USB_Single_Serial_5A2A026768-if00".to_string(),
+    let args: Vec<String> = env::args().collect();
+    let config = SerialConfig::from_args(&args)?;
 
-        baudrate: 4000000,
-        // range_min: 0.25,
-        ..SerialConfig::default()
-    };
-
-    let rec = RecordingStreamBuilder::new("unilidar_l2").spawn()?;
-    println!("rerun stream spawned");
+    let server_url = arg_value(&args, "--rerun-url")
+        .or_else(|| arg_value(&args, "--rerun-grpc-url"))
+        .or_else(|| env::var("RERUN_GRPC_URL").ok())
+        .unwrap_or_else(|| "rerun+http://127.0.0.1:9876/proxy".to_string());
+    let rec = RecordingStreamBuilder::new("hive-rs-localization").connect_grpc_opts(&server_url)?;
+    println!("rerun stream connected to {server_url}");
     rec.log("lidar/points", &Clear::recursive())?;
     rec.log_static(
         "lidar/sensor_origin",
@@ -108,4 +106,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             last_report = Instant::now();
         }
     }
+}
+
+fn arg_value(args: &[String], name: &str) -> Option<String> {
+    args.windows(2)
+        .find(|pair| pair[0] == name)
+        .map(|pair| pair[1].clone())
 }
