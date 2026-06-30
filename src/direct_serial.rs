@@ -160,6 +160,7 @@ pub struct SerialPointCloudReader {
     frame_buf: Vec<u8>,
     range_min: f32,
     range_max: f32,
+    use_system_timestamp: bool,
 }
 
 impl SerialPointCloudReader {
@@ -177,6 +178,7 @@ impl SerialPointCloudReader {
             frame_buf: Vec::with_capacity(MAX_FRAME_SIZE * 2),
             range_min: config.range_min,
             range_max: config.range_max,
+            use_system_timestamp: config.use_system_timestamp,
         })
     }
 
@@ -195,7 +197,12 @@ impl SerialPointCloudReader {
     pub fn read_next(&mut self) -> Result<DirectSerialRead, DirectSerialError> {
         // Hand back any frame already buffered from an earlier read.
         if let Some(frame) = next_frame(&mut self.frame_buf) {
-            return Ok(read_from_frame(&frame, self.range_min, self.range_max));
+            return Ok(read_from_frame(
+                &frame,
+                self.range_min,
+                self.range_max,
+                self.use_system_timestamp,
+            ));
         }
 
         let bytes_read =
@@ -216,7 +223,12 @@ impl SerialPointCloudReader {
 
         match next_frame(&mut self.frame_buf) {
             Some(frame) => {
-                let mut read = read_from_frame(&frame, self.range_min, self.range_max);
+                let mut read = read_from_frame(
+                    &frame,
+                    self.range_min,
+                    self.range_max,
+                    self.use_system_timestamp,
+                );
                 read.bytes_read = bytes_read;
                 Ok(read)
             }
@@ -230,50 +242,16 @@ pub fn set_lidar_work_mode_serial(
     config: SerialConfig,
     mode: u32,
 ) -> Result<(), DirectSerialError> {
-    configure_tty(&config.port, config.baudrate)?;
-
-    let mut serial = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&config.port)
-        .map_err(|source| DirectSerialError::Open {
-            port: config.port.clone(),
-            source,
-        })?;
-
     let frame = work_mode_command_frame(mode);
-    serial
-        .write_all(&frame)
-        .and_then(|()| serial.flush())
-        .map_err(|source| DirectSerialError::Write {
-            port: config.port,
-            source,
-        })
+    write_serial_command_frame(&config, &frame)
 }
 
 pub fn set_lidar_udp_config_serial(
     serial_config: SerialConfig,
     udp_config: UdpConfig,
 ) -> Result<(), DirectSerialError> {
-    configure_tty(&serial_config.port, serial_config.baudrate)?;
-
-    let mut serial = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&serial_config.port)
-        .map_err(|source| DirectSerialError::Open {
-            port: serial_config.port.clone(),
-            source,
-        })?;
-
     let frame = udp_config_command_frame(&udp_config)?;
-    serial
-        .write_all(&frame)
-        .and_then(|()| serial.flush())
-        .map_err(|source| DirectSerialError::Write {
-            port: serial_config.port,
-            source,
-        })
+    write_serial_command_frame(&serial_config, &frame)
 }
 
 pub fn reset_lidar_serial(config: SerialConfig) -> Result<(), DirectSerialError> {
@@ -288,10 +266,23 @@ pub fn stop_lidar_rotation_serial(config: SerialConfig) -> Result<(), DirectSeri
     send_lidar_user_control_serial(&config, USER_CMD_STANDBY_TYPE, USER_CMD_STANDBY_STOP)
 }
 
+pub fn sync_lidar_timestamp_serial(config: SerialConfig) -> Result<(), DirectSerialError> {
+    let frame = timestamp_command_frame(system_timestamp());
+    write_serial_command_frame(&config, &frame)
+}
+
 fn send_lidar_user_control_serial(
     config: &SerialConfig,
     cmd_type: u32,
     cmd_value: u32,
+) -> Result<(), DirectSerialError> {
+    let frame = user_control_command_frame(cmd_type, cmd_value);
+    write_serial_command_frame(config, &frame)
+}
+
+fn write_serial_command_frame(
+    config: &SerialConfig,
+    frame: &[u8],
 ) -> Result<(), DirectSerialError> {
     configure_tty(&config.port, config.baudrate)?;
 
@@ -304,9 +295,8 @@ fn send_lidar_user_control_serial(
             source,
         })?;
 
-    let frame = user_control_command_frame(cmd_type, cmd_value);
     serial
-        .write_all(&frame)
+        .write_all(frame)
         .and_then(|()| serial.flush())
         .map_err(|source| DirectSerialError::Write {
             port: config.port.clone(),
@@ -359,7 +349,12 @@ fn no_packet(bytes_read: usize) -> DirectSerialRead {
     }
 }
 
-fn read_from_frame(frame: &[u8], range_min: f32, range_max: f32) -> DirectSerialRead {
+fn read_from_frame(
+    frame: &[u8],
+    range_min: f32,
+    range_max: f32,
+    use_system_timestamp: bool,
+) -> DirectSerialRead {
     let packet = packet_type(frame);
     let direct_packet = match packet {
         LIDAR_POINT_DATA_PACKET_TYPE => DirectSerialPacket::PointData,
@@ -368,7 +363,9 @@ fn read_from_frame(frame: &[u8], range_min: f32, range_max: f32) -> DirectSerial
     };
 
     let point_cloud = match direct_packet {
-        DirectSerialPacket::PointData => parse_point_cloud(frame, range_min, range_max),
+        DirectSerialPacket::PointData => {
+            parse_point_cloud(frame, range_min, range_max, use_system_timestamp)
+        }
         DirectSerialPacket::PointData2D | DirectSerialPacket::Other(_) => None,
     };
     let imu_data = match direct_packet {
@@ -420,6 +417,7 @@ fn parse_point_cloud(
     frame: &[u8],
     config_range_min: f32,
     config_range_max: f32,
+    use_system_timestamp: bool,
 ) -> Option<PointCloud> {
     let data = frame.get(12..)?;
 
@@ -498,8 +496,14 @@ fn parse_point_cloud(
         time_relative += time_increment;
     }
 
+    let cloud_stamp = if use_system_timestamp {
+        system_time_seconds() - scan_period as f64
+    } else {
+        timestamp_seconds(le_u32(data, 8), le_u32(data, 12))
+    };
+
     Some(PointCloud {
-        stamp: system_time_seconds() - scan_period as f64,
+        stamp: cloud_stamp,
         id: 1,
         ring_num: 1,
         points,
@@ -533,10 +537,24 @@ fn parse_imu_data(frame: &[u8]) -> Option<ImuData> {
 }
 
 fn system_time_seconds() -> f64 {
-    std::time::SystemTime::now()
+    let stamp = system_timestamp();
+    timestamp_seconds(stamp.sec, stamp.nsec)
+}
+
+fn system_timestamp() -> ffi::TimeStamp {
+    let duration = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_secs_f64())
-        .unwrap_or(0.0)
+        .unwrap_or_default();
+    let sec = u32::try_from(duration.as_secs()).unwrap_or(u32::MAX);
+
+    ffi::TimeStamp {
+        sec,
+        nsec: duration.subsec_nanos(),
+    }
+}
+
+fn timestamp_seconds(sec: u32, nsec: u32) -> f64 {
+    sec as f64 + f64::from(nsec) / 1.0e9
 }
 
 fn le_u16(buf: &[u8], offset: usize) -> u16 {
@@ -586,6 +604,23 @@ fn user_control_command_frame(cmd_type: u32, cmd_value: u32) -> [u8; 32] {
     let mut frame = [0u8; 32];
     frame[0..4].copy_from_slice(&FRAME_HEADER);
     frame[4..8].copy_from_slice(&LIDAR_USER_CMD_PACKET_TYPE.to_le_bytes());
+    frame[8..12].copy_from_slice(&32u32.to_le_bytes());
+    frame[12..20].copy_from_slice(&data);
+    frame[20..24].copy_from_slice(&crc.to_le_bytes());
+    frame[30] = 0x00;
+    frame[31] = 0xff;
+    frame
+}
+
+fn timestamp_command_frame(stamp: ffi::TimeStamp) -> [u8; 32] {
+    let mut data = [0u8; 8];
+    data[0..4].copy_from_slice(&stamp.sec.to_le_bytes());
+    data[4..8].copy_from_slice(&stamp.nsec.to_le_bytes());
+    let crc = crc32(&data);
+
+    let mut frame = [0u8; 32];
+    frame[0..4].copy_from_slice(&FRAME_HEADER);
+    frame[4..8].copy_from_slice(&LIDAR_TIME_STAMP_PACKET_TYPE.to_le_bytes());
     frame[8..12].copy_from_slice(&32u32.to_le_bytes());
     frame[12..20].copy_from_slice(&data);
     frame[20..24].copy_from_slice(&crc.to_le_bytes());

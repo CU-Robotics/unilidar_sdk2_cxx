@@ -1,7 +1,7 @@
 pub use crate::direct_serial::{
     DirectSerialError, DirectSerialPacket, DirectSerialRead, SerialPointCloudReader,
     reset_lidar_serial, set_lidar_udp_config_serial, set_lidar_work_mode_serial,
-    start_lidar_rotation_serial, stop_lidar_rotation_serial,
+    start_lidar_rotation_serial, stop_lidar_rotation_serial, sync_lidar_timestamp_serial,
 };
 pub use crate::ffi::{DataInfo, ImuData, Point, PointCloud};
 
@@ -112,6 +112,7 @@ mod ffi {
         fn startLidarRotation(self: Pin<&mut LidarWrapper>);
         fn stopLidarRotation(self: Pin<&mut LidarWrapper>);
         fn setLidarWorkMode(self: Pin<&mut LidarWrapper>, mode: u32);
+        fn syncLidarTimeStamp(self: Pin<&mut LidarWrapper>);
         fn getPointCloud(self: Pin<&mut LidarWrapper>, rustPointCloud: &mut PointCloud) -> bool;
         fn getImuData(self: Pin<&mut LidarWrapper>, rustImuData: &mut ImuData);
     }
@@ -377,6 +378,19 @@ impl UnilidarL2 {
         }
 
         self.lidar_wrapper.pin_mut().setLidarWorkMode(mode);
+    }
+
+    /// Sync the lidar hardware timestamp to the host system timestamp.
+    ///
+    /// When `use_system_timestamp` is false, point clouds and IMU samples then use the same
+    /// lidar-provided clock instead of mixing host-stamped clouds with hardware-stamped IMU data.
+    pub fn sync_lidar_timestamp(&mut self) -> Result<(), DirectSerialError> {
+        if let Some(config) = &self.direct_serial_config {
+            return sync_lidar_timestamp_serial(config.clone());
+        }
+
+        self.lidar_wrapper.pin_mut().syncLidarTimeStamp();
+        Ok(())
     }
 
     /// Gets the latest parsed point cloud.

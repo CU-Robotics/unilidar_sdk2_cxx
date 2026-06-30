@@ -68,6 +68,10 @@ void LidarWrapper::setLidarWorkMode(uint32_t mode) {
     this->lidarReader->setLidarWorkMode(mode);
 }
 
+void LidarWrapper::syncLidarTimeStamp() {
+    this->lidarReader->syncLidarTimeStamp();
+}
+
 bool LidarWrapper::getPointCloud(PointCloud& rustPointCloud) {
     if (!this->lidarReader->getPointCloud(this->pointCloud)) {
         rustPointCloud.points.clear();
